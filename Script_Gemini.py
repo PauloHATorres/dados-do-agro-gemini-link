@@ -16,10 +16,14 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 
 PASTA_DO_PROJETO = Path(__file__).resolve().parent
+# Carrega automaticamente as configurações privadas do arquivo .env.
+load_dotenv(PASTA_DO_PROJETO / ".env")
+
 NOME_ARQUIVO_CSV = "arquivo.csv"
 MODELO_PADRAO = "gemini-3.6-flash"
 TAMANHO_LOTE_PADRAO = 100
