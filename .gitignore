@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 resposta_gemini.txt
+*_classificado.csv
+*_partes_*/

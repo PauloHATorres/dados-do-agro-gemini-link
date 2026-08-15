@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import time
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field
 PASTA_DO_PROJETO = Path(__file__).resolve().parent
 NOME_ARQUIVO_CSV = "arquivo.csv"
 MODELO_PADRAO = "gemini-3.6-flash"
-TAMANHO_LOTE_PADRAO = 25
+TAMANHO_LOTE_PADRAO = 100
 
 COLUNA_TEMA = "Classificação temática"
 COLUNA_FONTE = "Classificação da fonte"
@@ -177,6 +178,31 @@ def _classificar_lote(
     ) from ultimo_erro
 
 
+def _escrever_csv_atomico(
+    destino: Path,
+    linhas: list[dict[str, str]],
+    cabecalhos: list[str],
+    separador: str,
+) -> None:
+    """Grava um CSV sem deixar um arquivo incompleto em caso de interrupção."""
+    temporario = destino.with_suffix(destino.suffix + ".tmp")
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with temporario.open("w", encoding="utf-8-sig", newline="") as arquivo_saida:
+            escritor = csv.DictWriter(
+                arquivo_saida,
+                fieldnames=cabecalhos,
+                delimiter=separador,
+                extrasaction="ignore",
+            )
+            escritor.writeheader()
+            escritor.writerows(linhas)
+        temporario.replace(destino)
+    finally:
+        if temporario.exists():
+            temporario.unlink()
+
+
 def classificar_csv(
     caminho_csv: str | Path,
     *,
@@ -204,14 +230,52 @@ def classificar_csv(
         if caminho_saida
         else arquivo.with_name(f"{arquivo.stem}_classificado.csv")
     )
-    temporario = destino.with_suffix(destino.suffix + ".tmp")
     nome_modelo = modelo or os.getenv("GEMINI_MODEL", MODELO_PADRAO)
+    assinatura = hashlib.sha256(
+        arquivo.read_bytes()
+        + tema_busca.encode("utf-8")
+        + nome_modelo.encode("utf-8")
+        + str(tamanho_lote).encode("ascii")
+    ).hexdigest()[:10]
+    pasta_partes = arquivo.parent / f"{arquivo.stem}_partes_{assinatura}"
+    pasta_partes.mkdir(parents=True, exist_ok=True)
     cliente = genai.Client(api_key=api_key)
+
+    novos_cabecalhos = [
+        campo for campo in cabecalhos if campo not in (COLUNA_TEMA, COLUNA_FONTE)
+    ] + [COLUNA_TEMA, COLUNA_FONTE]
 
     try:
         total = len(linhas)
         for inicio in range(0, total, tamanho_lote):
             fim = min(inicio + tamanho_lote, total)
+            numero_parte = inicio // tamanho_lote + 1
+            caminho_parte = pasta_partes / f"{arquivo.stem}_parte_{numero_parte:03d}.csv"
+
+            if caminho_parte.is_file():
+                linhas_parte, _, _ = _ler_csv(caminho_parte)
+                quantidade_esperada = fim - inicio
+                parte_valida = (
+                    len(linhas_parte) == quantidade_esperada
+                    and all(
+                        linha.get(COLUNA_TEMA) and linha.get(COLUNA_FONTE)
+                        for linha in linhas_parte
+                    )
+                )
+                if parte_valida:
+                    print(
+                        f"Reutilizando parte {numero_parte}: linhas "
+                        f"{inicio + 1} a {fim} de {total}."
+                    )
+                    for deslocamento, linha_parte in enumerate(linhas_parte):
+                        linhas[inicio + deslocamento][COLUNA_TEMA] = linha_parte[
+                            COLUNA_TEMA
+                        ]
+                        linhas[inicio + deslocamento][COLUNA_FONTE] = linha_parte[
+                            COLUNA_FONTE
+                        ]
+                    continue
+
             registros = [
                 {"id_linha": indice + 1, **linhas[indice]}
                 for indice in range(inicio, fim)
@@ -225,30 +289,21 @@ def classificar_csv(
                 linha = linhas[item.id_linha - 1]
                 linha[COLUNA_TEMA] = item.classificacao_tematica.strip()
                 linha[COLUNA_FONTE] = item.classificacao_fonte.strip()
+
+            _escrever_csv_atomico(
+                caminho_parte,
+                linhas[inicio:fim],
+                novos_cabecalhos,
+                separador,
+            )
+            print(f"Parte salva: {caminho_parte.name}")
     finally:
         cliente.close()
 
-    novos_cabecalhos = [
-        campo for campo in cabecalhos if campo not in (COLUNA_TEMA, COLUNA_FONTE)
-    ] + [COLUNA_TEMA, COLUNA_FONTE]
-
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with temporario.open("w", encoding="utf-8-sig", newline="") as arquivo_saida:
-            escritor = csv.DictWriter(
-                arquivo_saida,
-                fieldnames=novos_cabecalhos,
-                delimiter=separador,
-                extrasaction="ignore",
-            )
-            escritor.writeheader()
-            escritor.writerows(linhas)
-        temporario.replace(destino)
-    finally:
-        if temporario.exists():
-            temporario.unlink()
+    _escrever_csv_atomico(destino, linhas, novos_cabecalhos, separador)
 
     print(f"Arquivo classificado criado em: {destino}")
+    print(f"Partes preservadas para retomada em: {pasta_partes}")
     return destino
 
 
@@ -278,7 +333,7 @@ def main() -> None:
         "--lote",
         type=int,
         default=TAMANHO_LOTE_PADRAO,
-        help="Quantidade de registros enviada em cada chamada (padrão: 25).",
+        help="Quantidade de registros enviada em cada chamada (padrão: 100).",
     )
     args = parser.parse_args()
 
