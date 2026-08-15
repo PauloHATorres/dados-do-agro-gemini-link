@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 PASTA_DO_PROJETO = Path(__file__).resolve().parent
 # Carrega automaticamente as configurações privadas do arquivo .env.
-load_dotenv(PASTA_DO_PROJETO / ".env")
+load_dotenv(PASTA_DO_PROJETO / ".env", override=True)
 
 NOME_ARQUIVO_CSV = "arquivo.csv"
 MODELO_PADRAO = "gemini-3.6-flash"
