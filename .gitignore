@@ -4,3 +4,4 @@ __pycache__/
 resposta_gemini.txt
 *_classificado.csv
 *_partes_*/
+csv_simulacao*.csv
